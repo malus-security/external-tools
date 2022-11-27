@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>JTool2 - Taking the O out of otool - squared</title>
+<meta name="keywords" content="Mach-O, Macho, iOS, OSX, Internals, OS X Internals, iOS Internals, ARM64, disassembly, book, Reverse Engineering" />
+<link rel="stylesheet" type="text/css" href="article.css" />
+<style>
+ .output { font-size : 9pt; padding-left : 10px; padding-right: 10px; padding-top: 2px; padding-bottom : 5px; border : 1px solid black;  background-color : black ; color : #00FF00; overflow : auto; width : 65em; }
+
+</style>
+</head>
+<body>
+<article>
+<h1>jtool - Taking the O out of otool(1), and so much more</title>
+
+<h2>What is this?</h2>
+
+<p>The <code>jtool</code>  utility started as a companion utility to <a href="/1stEdIsFree.html">the 1<sup>st</sup> edition of MacOS internals</a>, because I wanted to demonstrate Mach-O format intrinstics, and was annoyed with XCode's <code>otool(1)</code>. Along the way, <code>jtool</code> absorbed additional Mach-O commands such as <code>atos(1)</code>, <code>dyldinfo(1)</code>, <code>nm(1)</code>, <code>segedit(1)</code>, <code>pagestuff(1)</code>, <code>strings(1)</code> , and even <code>codesign(1)</code> and the informal <code>ldid</code>.  Most importantly, it can be run on a variety of platforms - <b>OS X, iOS, and even Linux</b>, where Apple's tools don't exist. 
+
+<p>But that's not all. <code>jtool</code> provides many many novel features:
+  <ul> 
+	<li>in-binary  search functionality</li>
+	<li>symbol injection</li>
+	<li>built-in disassembler functionality with (limited but constantly improving) emulation capabilities, which already outdo fancy commercial GUI disassemblers.</li>
+	<li>Color terminal output, enabled by <code>JCOLOR=1</code>
+ </ul>
+
+<p>As the code got more and more complex, I decided to rewrite <code>jtool</code> from scratch, bringing you <code>jtool2</code> - and effectively deprecating the v1 binary. New features in <code>jtool2</code> include:
+
+
+ <ul>
+	<li><code>--analyze</code> to automatically analyze any Mach-O, generating a companion file.</li>
+	<li>kernelcache symbolication (what I <a href="/tools/joker.html">formerly provided via <code>joker</code></a>) - which has become even more important since the advent of monolithic ("1469") kernelcaches, with no more symbols. <code>jtool2</code> finds syscalls, Mach traps, MIG tables, interesting (for me, at least) functions, and IOKit objects - thousands of objects in all.</li>
+	<li>Panic log symbolication: *OS panic logs are JSON and have little to no symbols - but <code>--symbolicate</code> (with a companion file prebuilt by <code>--analyze</code>) will rectify that.</li>
+
+</ul>
+
+
+<b><code>jtool</code> and <code>jtool2</code> ENTIRELY FREE for use of any type</b> (AISE), and the latest version can always be found <a href="/tools/jtool2.tgz">right here</a>. For the legacy v1 download, <a href="/tools/jtool.tgz">click here</a>, which I'm leaving here because I still am not finished with Objective-C support in v2.</p>
+
+
+<figure class="output">
+<pre>
+morpheus@Bifröst (~) %jtool2 --help                                                                                           11:10
+Usage: jtool [options] _filename_
+
+OTool Compatible Options:
+   -h         	Dump Mach-O (or DYLD Shared Cache) header
+   -l         	List sections/commands in binary
+   -L         	print shared libraries used
+
+JTool (classic) Options:
+   -S         	List Symbols (like NM)
+   -v[v]      	Toggle verbosity (vv = very verbose)
+   -e         	extract fat slice, Mach-O segment/section, dyld shared cache dylib or (NEW) kernelcache kext
+   -q         	Quick operation - do not process any symbols in the Mach-O
+   -F         	find all occurrences of _string_ in binary
+   -a         	Find offset/segment corresponding to virtual address _addr_
+   -o         	Find address corresponding to offset _offset_
+   -d         	Dump (smart dump, will disassemble text and dump data by autodetecting)
+
+Code Signing Options:
+   --sig      	Show code signature in binary (if any)
+   --ent      	Show entitlements in binary (if any)
+   -+ent=...[,...]	Inject entitlements into binary (implies resigning inplace)
+   -+platformize	Platformize binary (injects platform-application, also implies resigning inplace)
+
+Joker Compatible Options (applicable on kernel caches only):
+   -k         	List kexts
+   -K         	Kextract™ a kernel extension by its bundle ID
+   -dec       	Decompress a kernelcache to /tmp/kernel (no longer necessary since JTool can now operate on compressed caches)
+
+dyldinfo Compatible Options:
+   --bind     		print addresses dyld will set based on symbolic lookups
+   --lazy_bind		print addresses dyld will lazily set on first use
+   --opcodes  		print opcodes used to generate the rebase and binding information
+   --function_starts	print table of function start addresses
+
+Newer (JTool 2) Options:
+   --analyze  	Analyze file and create a companion file
+   --symbolicate	Symbolicate an .ips panic file
+   --tbd      	Create a .tbd file (for *OS private frameworks only - you'll need the dyld shared cache for this)
+   -D         	Decompile (totally experimental - would love your feedback if you're reading this)
+   -G         	Gadget search (specify gadgets as comma delimited mnemonics)
+
+Environment Variables:
+   ARCH                	Select architecture slice. Set to arm64, arm64e, arm64_32, armv7, armv7k, x86_64 or (not for long) i386
+   JDEBUG              	Enhanced debug output. May be very verbose
+   JCOLOR              	ANSI Colors. Note you'll need 'less -R' if piping output
+   JTOOLDIR            	path to search for companion jtool files (default: $PWD).
+			Use this to force create a file, if one does not exist
+   NOPSUP              	Suppress NOPs in disassembly
+
+<!--
+This is jtool v(almost 1.0) (Moscow) - with partial ARMv7k disassembly and SLC symbol resolution, compiled on Jan  8 2017 20:33:01
+
+Usage: jtool [options] _filename_
+
+OTool Compatible Options:
+   -arch ..            	For fat (universal) binaries: i386,x86_64[h], arm[v[67]]
+   -h                  	print header (ELF or Mach-O)
+   -f                  	print fat header
+   -l                  	List sections/commands in binary
+   -L                  	List shared libraries used (like LDD)
+   -v[v]               	Verbose output. -vv is even more verbose. -vvv might be more than you can handle :-)
+
+New Options:
+   --pages             	Show file page map (similar to pagestuff(1))
+   -a _offset_         	Find virtual address corresponding to file offset _offset
+   -e[xtract] _name_   	Extract section/segment _name_ in binary, or file _name_ from shared cache
+   -e[xtract] arch     	Extract selected architecture from FAT file. Specify arch with -arch .. or ARCH=
+   -e[xtract] signature	Extract code signature from binary
+   -F [_string_]       	find all occurrences of _string_ in binary
+      -Fs _string_     	also show search results (experimental)
+   -S                  	List Symbols (like NM)
+      -Sa _address_ _symbolname_	Add symbolname manually for address (to .jtool)
+      -Sd _symbolname_ (not yet)	Remove symbolname for address (to .jtool)
+   -p _addr_[,_size_]  	Peek at _size_ bytes in virtual _address_ in binary (like OD, but on memory)
+
+dyldinfo Compatible Options:
+   -bind               	print addresses dyld will set based on symbolic lookups
+   -lazy_bind          	print symbols which dyld will lazily set on first use
+   -weak_bind          	print symbols which dyld must coalesce
+   -export             	print addresses of all symbols this file exports
+   -opcodes            	print opcodes used to generate the rebase and binding information
+   -function_starts    	print table of function start addresses
+   -data_in_code       	print any data-in-code inforamtion
+
+Destructive Options (will write output to /tmp):
+   -m                  	Modify
+     __SEGMENT[.__section],[_offset][,size]	(null)
+   -r                  	Remove/Resize (Experimental)
+     -rL _dylib/soname_      	Library
+     -rC _Load_Command_#_    	Load Command
+   -/+pie              	Toggle Position Independent Executable (ASLR)
+   -/+lcmain           	Toggle pre-Mountain-Lion/iOS6 compatibility (LC_UNIXTHREAD/LC_MAIN)
+   -/+enc              	Mark as decrypted/encrypted (toggles cryptid of LC_ENCRYPTION_INFO[64])
+
+Disassembly/Dump Options:
+   -d[_arg_[,size]]    	disassemble/dump (experimental) -  _arg_ may specify address/section/symbol/Obj-C class. size is optional
+     -dA [_arg_[,size]]	Disassemble as ARM code (32-bit instructions)
+     -dT [_arg_[,size]]	Disassemble as Thumb/Thumb-2 code (16/32-bit instructions)
+     -dD [_arg_[,size]]	Dump (even on a text segment)
+     -do [_arg_[,size]]	Dump/Disassemble from offset, rather than address
+     -d objc           	Dump objective-C classes in binary, if any
+   -D : As -d, but attempts to decompile only (i.e. shows only C-level code, no disassembly	(null)
+   -opcodes            	Also dump opcode bytes
+   --jtooldir _path_   	path to search for companion jtool files (default: $PWD).
+			Use this to force create a file, if one does not exist
+
+Code Signing Options:
+   --sig               	Show code signature in binary (if any)
+   --sign [adhoc]      	self-sign with no certificate
+   --ident _ident_     	provides identity (fake, of course)
+   --appdir            	Set App Path (for code signing and/or verification)
+   --ent               	Show entitlements in binary (if any)
+
+Advanced Options:
+   --pcrelative        	show addresses as PC relative offset
+   --slide  _slide_    	slide text by _slide_ bytes (may be negative)
+   --rebase _address_  	rebase text to this address (destructive)
+   --inplace           	Perform destructive operations in place (instead of out.bin) for the brave
+   --version           	Show tool version and compilation date
+
+Output Options:
+   --html              	Output as HTML (implies color)
+   --curses            	Output as Color using ncurses (can also set JCOLOR=1)
+
+Environment variables: JDEBUG=1, NOPSUP=1 (suppress NOPs in disassembly), NOOBJC=1 (avoid Obj-C crashes)
+
+Note: Experimental features may not be available in public version of this tool!-->
+</pre>
+</figure>
+
+<div class="note"><p><b><u>Important:</u></b> Jtool has been thoroughly tested, but I still rely on your bug reports to tackle some of the more exotic animals in the Mach-O menagerie. If you have an interesting binary which JTool is struggling with or if it (*gulp*) crashes, <b><u>PLEASE LET ME KNOW</u></b>. I can't fix bugs I don't know about.. and ranting on Twitter that you got a segfault is useless because a) I don't check Twitter much b) jtool2 was not meant to consider malicious malformed Mach-Os - it is targeting AAPL's own binaries and c) you're just denigrating a powerful, useful and FREE tool. If you think you can do better, write your own.</div>
+<p>So let's go over options, one by one:</p>
+
+
+<p>There are so many useful features to <code>jtool</code> that I can't put them all in the man page anymore. Truthfully, nobody reads the man anyway (since you have to move <path>jtool.1</path> to <path>/usr/share/man/man1</path>). So I finally put up a decent HTML document. That, too, is growing out of proportion, so even here not everything is covered, but here's a hyperlinked ToC to what is:</p>
+
+<ul>
+  <li><a href="#otool">Otool Compatible options</a></li>
+  <li><a href="#dyldinfo">dyldinfo Compatible options</a></li>
+<li>Advanced options:<ul>
+<li><a href="#pages">-pages</a> (get layout)</li>
+<li><a href="#a">-a</a> (lookup address)</li>
+<li><a href="#S">-S</a></li>
+</ul>
+</li>
+<li><a href="">Code Singing options</a>
+ <ul>
+	<li><a href="#sig">--sig</a></li>
+	<li><a href="#ent">--ent</a></li>
+	<li><a href="#sign">--sign</a></li>
+ </ul>
+</li>
+
+
+<li><a href="#objc">Objective-C</a></li>
+<li><a href="#darncool">Darn Cool Options</a></li>
+</ul>
+<h2 name="otool">Otool Compatible Options</h2>
+
+<p>When I started work on <code>jtool</code>, I thought I would make it a drop-in replacement for <code>otool</code>, so some of its options are in fact identical. Those include <code>-L</code> (to show library dependencies, similar to <code>ldd</code>), and <code>-f</code> (for FAT headers). Others are compatible, but deviate. For example: <code>-h</code> for the Mach-O header, will print the details about the header not on a single line, but on multiple ones:
+
+<figure class="output">
+<pre>
+Zephyr:~ morpheus$ <span class="typed">otool -h /bin/ls</span>
+/bin/ls:
+Mach header
+      magic cputype cpusubtype  caps    filetype ncmds sizeofcmds      flags
+ 0xfeedfacf 16777223          3  0x80           2    19       1816 0x00200085
+
+Zephyr:~ morpheus$ <span class="typed">jtool -h  /bin/ls</span>
+Magic:	64-bit Mach-O
+Type:	executable
+CPU:	x86_64
+Cmds:	19
+size:	1816 bytes
+Flags:	0x200085
+</pre>
+</figure>
+
+<p>The reason I deviated is to make <code>jtool</code> more <code>grep(1)</code> friendly, so you could isolate the line containing the attribute you want. In the case of the most common option (<code>-l</code>), however, it actually makes sense to combine the output from <code>otool</code>'s multiple lines into less lines, in order to make it more friendly. Case in point:
+</p>
+
+<figure class="output">
+<pre>
+$ <span class="typed">otool -l /bin/ls</span>                $ <span class="typed">jtool -l /bin/ls</span>
+/bin/ls:
+Load command 0                    LC 00: LC_SEGMENT_64          Mem: 0x000000000-0x100000000      __PAGEZERO
+      cmd LC_SEGMENT_64           LC 01: LC_SEGMENT_64          Mem: 0x100000000-0x100005000      __TEXT
+  cmdsize 72                             Mem: 0x100004430-0x100004604            __TEXT.__stubs  (Symbol Stubs)
+  segname __PAGEZERO                     Mem: 0x100004430-0x100004604            __TEXT.__stubs  (Symbol Stubs)
+   vmaddr 0x0000000000000000             Mem: 0x100004920-0x100004b10            __TEXT.__const  
+   vmsize 0x0000000100000000             Mem: 0x100004b10-0x100004f66            __TEXT.__cstring        (C-String Literals)               
+  fileoff 0                              Mem: 0x100004430-0x100004604            __TEXT.__stubs  (Symbol Stubs)
+ filesize 0                        LC 02: LC_SEGMENT_64          Mem: 0x100005000-0x100006000      __DATA
+  maxprot 0x00000000                         ....
+ initprot 0x00000000
+   nsects 0
+    flags 0x0
+Load command 1
+      cmd LC_SEGMENT_64
+  cmdsize 552
+  segname __TEXT
+   vmaddr 0x0000000100000000
+   vmsize 0x0000000000005000
+  fileoff 0
+ filesize 20480
+  maxprot 0x00000007
+ initprot 0x00000005
+   nsects 6
+    flags 0x0
+...
+</pre>
+</figure>
+
+<p><code>otool</code>'s output is simply terrible, in that it is thinly spread over multiple lines. <code>jtool</code> condenses it so you can clearly see what matters, and take less space (or scrolling through pages and pages of <code>more(1)</code> or <code>less(1)</code>). Another benefit is using <code>grep</code>:
+
+<figure class="output">
+<pre>
+<span class="annotation"># Finding details about a segment with <code>otool(1)</code>:</span>
+Zephyr:~ morpheus$ <span class="typed">otool -l /bin/ls | grep LC_SEGM</span>
+      cmd LC_SEGMENT_64
+      cmd LC_SEGMENT_64
+      cmd LC_SEGMENT_64
+      cmd LC_SEGMENT_64
+<span class="annotation"># Really helpful, right? Yes, you could do that with grep -A, but I find this simpler: </span>
+Zephyr:~ morpheus$ <span class="typed">jtool -l -v /bin/ls | grep LC_SEGM</span>
+LC 00: LC_SEGMENT_64          Mem: 0x000000000-0x100000000	File: Not Mapped	---/---	__PAGEZERO
+LC 01: LC_SEGMENT_64          Mem: 0x100000000-0x100005000	File: 0x0-0x5000	r-x/rwx	__TEXT
+LC 02: LC_SEGMENT_64          Mem: 0x100005000-0x100006000	File: 0x5000-0x6000	rw-/rwx	__DATA
+LC 03: LC_SEGMENT_64          Mem: 0x100006000-0x100009000	File: 0x6000-0x8750	r--/rwx	__LINKEDIT
+</pre>
+</figure>
+
+<p> Notice in the above use of <code>-v</code>, which adds verbosity - in the case of <code>LC_SEGMENT</code> commands, the file mappings.</p>
+
+<p>For universal (fat) files, <code>jtool</code> provides the same <code>-arch</code> switch to single out a particular architecture. There are several differences from <code>otool</code>:
+
+<ul><li><code>jtool</code> will refuse to touch a fat binary unless you specify the architecture</li>
+ <li>You can specify the architecture with <code>-arch</code>, <b>or</b> specify <code>ARCH=</code> as an environment variable. This makes it useful to set a default.</li>
+ <li>You can specify an architecture by number</li>
+</ul>
+
+<p>The last option there seems unusual - after all, how many architectures can there be in a fat file? Yeah, well, I thought so too, until I encountered TaiG's 8.4 Jailbreak, which not only uses fat binaries of some 26-27 architectures, but also uses duplicate entries - confusing <code>otool</code> since it only matches the first one - but <code>jtool</code> can single out a particular slice this way. (<a href="/articles/28DaysLater.html#codesigning">q.v my writeup on that jailbreak here for an example</a>).
+
+<h2 id="dyldinfo"><code>dyldinfo(1)</code> compatible options</h2>
+
+<p>The <code>dyldinfo(1)</code> utility is really useful to explore the inner workings of Apple's dynamic loader. But it's not available for iOS. <code>jtool</code> can match most of <code>dyldinfo</code>'s options easily, and can in fact emulate it busybox-style, if you symbolically link <code>dyldinfo</code> to it and call it:</code>
+
+<figure class="output">
+<pre>
+Zephyr:~ morpheus$ <span class="typed">ln -s `which jtool` /tmp/dyldinfo</span>
+Zephyr:~ morpheus$ <span class="typed">!$</span>
+/tmp/dyldinfo
+Usage: dyldinfo [-arch &lt;arch&gt;] &lt;options&gt; &lt;mach-o file&gt;
+-dylibs           print dependent dylibs
+-rebase           print addresses dyld will adjust if file not loaded at preferred address
+-bind             print addresses dyld will set based on symbolic lookups
+-weak_bind        print symbols which dyld must coalesce
+-lazy_bind        print addresses dyld will lazily set on first use
+-function_starts  print table of function start addresses
+<span class="typed"># Call jtool with some dyldinfo option:</span>
+Zephyr:~ morpheus$ <span class="typed">/tmp/dyldinfo -bind /bin/ls</span>
+bind information:
+segment section          address        type    addend dylib            symbol
+__DATA  __got            0x100005000    pointer      0 libSystem.B.dylib    __DefaultRuneLocale
+__DATA  __got            0x100005008    pointer      0 libSystem.B.dylib    ___stack_chk_guard
+__DATA  __got            0x100005010    pointer      0 libSystem.B.dylib    ___stderrp
+__DATA  __got            0x100005018    pointer      0 libSystem.B.dylib    ___stdoutp
+__DATA  __got            0x100005020    pointer      0 libSystem.B.dylib    _optind
+__DATA  __nl_symbol_ptr  0x100005028    pointer      0 libSystem.B.dylib    dyld_stub_binder
+<span class="annotation"># Call the real binary:</span>
+Zephyr:~ morpheus$ <span class="typed">dyldinfo -bind /bin/ls</span>
+bind information:
+segment section          address        type    addend dylib            symbol
+__DATA  __got            0x100005000    pointer      0 libSystem        __DefaultRuneLocale
+__DATA  __got            0x100005008    pointer      0 libSystem        ___stack_chk_guard
+__DATA  __got            0x100005010    pointer      0 libSystem        ___stderrp
+__DATA  __got            0x100005018    pointer      0 libSystem        ___stdoutp
+__DATA  __got            0x100005020    pointer      0 libSystem        _optind
+__DATA  __nl_symbol_ptr  0x100005028    pointer      0 libSystem        dyld_stub_binder
+<span class="annotation"># Show weak binds: (Thanks Guhyeon)</span>
+Zephyr:~ morpheus$ <span class="typed">jtool -weak_bind /usr/sbin/weakpass_edit  </span>
+bind information:
+segment section          address    index  dylib            symbol
+__DATA  __la_symbol_ptr  0x100003040           this-image    __ZdlPv
+__DATA  __la_symbol_ptr  0x100003048           this-image    __Znwm
+</pre>
+</figure>
+
+<p>Since <code>jtool</code> basically mimics <code>dyldinfo</code> 1:1, refer to the latter's <code>man(1)</code> page for more detail. I use <code>-function_starts</code>, <code>-bind</code> and <code>-lazy_bind</code> most often.</p>
+
+<h2>New Options</h2>
+
+<h3 id="pages"><code>--pages</code></h3>
+
+<p>You may be familiar with the <code>pagestuff(1)</code> command, which dumps the layout of a Mach-O binary. Syntax is odd, placing the filename as the first argument and a bit crude:</p>
+
+<figure class="output">
+<pre>
+morpheus@Bifröst (~) % <span class="typed">pagestuff /bin/ls -a</span>  
+File Page 0 contains Mach-O headers
+File Page 0 contains contents of section (__TEXT,__text)
+Symbols on file page 0 virtual address 0x100000f08 to 0x100001000
+File Page 1 contains contents of section (__TEXT,__text)
+Symbols on file page 1 virtual address 0x100001000 to 0x100002000
+File Page 2 contains contents of section (__TEXT,__text)
+Symbols on file page 2 virtual address 0x100002000 to 0x100003000
+File Page 3 contains contents of section (__TEXT,__text)
+Symbols on file page 3 virtual address 0x100003000 to 0x100004000
+...<i>removed plentiful, hard-to-read output</i>
+</figure>
+<p> <code>jtool --pages</code> provides (what I believe to be) nicer output, like so:</p>
+<figure class="output">
+<pre>
+<span class="annotation"># Cut to the chase:</span>
+imorpheus@Bifröst (~) % <span class="typed">jtool2   --pages /bin/ls</span>
+0x0-0x5000 __TEXT	(20480 bytes)
+	0xf08-0x4420 __TEXT.__text	(13592 bytes)
+	0x4420-0x45e8 __TEXT.__stubs	(456 bytes)
+	0x45e8-0x48f0 __TEXT.__stub_helper	(776 bytes)
+	0x48f0-0x4ae8 __TEXT.__const	(504 bytes)
+	0x4ae8-0x4f67 __TEXT.__cstring	(1151 bytes)
+	0x4f68-0x4ff8 __TEXT.__unwind_info	(144 bytes)
+0x5000-0x6000 __DATA	(4096 bytes)
+	0x5000-0x5010 __DATA.__nl_symbol_ptr	(16 bytes)
+	0x5010-0x5038 __DATA.__got	(40 bytes)
+	0x5038-0x5298 __DATA.__la_symbol_ptr	(608 bytes)
+	0x52a0-0x54c8 __DATA.__const	(552 bytes)
+	0x54d0-0x54f8 __DATA.__data	(40 bytes)
+0x6000-0x9730 __LINKEDIT	(14128 bytes)
+	0x6000-0x6018 Rebase info       (opcodes)	(24 bytes)
+	0x6018-0x6090 Binding info      (opcodes)	(120 bytes)
+	0x6090-0x65f0 Lazy Binding info (opcodes)	(1376 bytes)
+	0x6610-0x6648 Function Starts	(56 bytes)
+	0x6648-0x6670 Data In Code	(40 bytes)
+	0x6670-0x6bb0 Symbol Table	(1344 bytes)
+	0x6e2c-0x71fc String Table	(976 bytes)
+	0x7200-0x9730 Code Signature	(9520 bytes)
+<span class="annotation">#
+# -v for mappings:
+#</span>
+morpheus@Bifröst (~) % <span class="typed">jtool2  -v  --pages /bin/ls</span>                                                                               0x0-0x5000 0x100000000-0x100005000 __TEXT	(20480 bytes)
+	0xf08-0x4420 0x100000f08-0x100004420 __TEXT.__text	(13592 bytes)
+	0x4420-0x45e8 0x100004420-0x1000045e8 __TEXT.__stubs	(456 bytes)
+	0x45e8-0x48f0 0x1000045e8-0x1000048f0 __TEXT.__stub_helper	(776 bytes)
+	0x48f0-0x4ae8 0x1000048f0-0x100004ae8 __TEXT.__const	(504 bytes)
+	0x4ae8-0x4f67 0x100004ae8-0x100004f67 __TEXT.__cstring	(1151 bytes)
+	0x4f68-0x4ff8 0x100004f68-0x100004ff8 __TEXT.__unwind_info	(144 bytes)
+0x5000-0x6000 0x100005000-0x100006000 __DATA	(4096 bytes)
+	0x5000-0x5010 0x100005000-0x100005010 __DATA.__nl_symbol_ptr	(16 bytes)
+	0x5010-0x5038 0x100005010-0x100005038 __DATA.__got	(40 bytes)
+	0x5038-0x5298 0x100005038-0x100005298 __DATA.__la_symbol_ptr	(608 bytes)
+	0x52a0-0x54c8 0x1000052a0-0x1000054c8 __DATA.__const	(552 bytes)
+	0x54d0-0x54f8 0x1000054d0-0x1000054f8 __DATA.__data	(40 bytes)
+0x6000-0x9730 0x100006000-0x100009730 __LINKEDIT	(14128 bytes)
+	0x6000-0x6018 0x100006000-0x100006018 Rebase info       (opcodes)	(24 bytes)
+	0x6018-0x6090 0x100006018-0x100006090 Binding info      (opcodes)	(120 bytes)
+	0x6090-0x65f0 0x100006090-0x1000065f0 Lazy Binding info (opcodes)	(1376 bytes)
+	0x6610-0x6648 0x100006610-0x100006648 Function Starts	(56 bytes)
+	0x6648-0x6670 0x100006648-0x100006670 Data In Code	(40 bytes)
+	0x6670-0x6bb0 0x100006670-0x100006bb0 Symbol Table	(1344 bytes)
+	0x6e2c-0x71fc 0x100006e2c-0x1000071fc String Table	(976 bytes)
+	0x7200-0x9730 0x100007200-0x100009730 Code Signature	(9520 bytes)
+</pre>
+</figure>
+
+
+<h2 id="a"><code>-a</code>/<code>-o</code></h2>
+
+<p>Sometimes you're just interested in a quick lookup of an offset to an address, without having to sift through <code>pagestuff(1)</code> or <code>jtool --pages</code> output. That's where <code>-a</code> comes in:</p>
+
+<figure class="output">
+<pre>
+morpheus@Bifröst (~) % <span class="typed">jtool2 -a 0x100040050 /Volumes/PeaceD16D57.D321OS/sbin/launchd</span>
+Address 0x100040050 (offset 0x40050) is in __DATA.__auth_got.. and linked to symbol libSystem.B.dylib::___stack_chk_fail
+<span class="annotation">#
+# Reverse lookup, from offset to address:
+#</span>
+morpheus@Bifröst (~) % <span class="typed">jtool2 -o 0x355 /Volumes/PeaceD16D57.D321OS/sbin/launchd</span>
+Offset 0x355 is in __DATA.__common, loaded at address 0x100044b55
+</pre>
+</figure>
+
+<p>With <code>-o</code> doing the offset to address mapping.</p>
+
+<h2 id="S"><code>-S</code></h2>
+<p><code>-S</code> does the same thing that <code>nm(1)</code> does. 
+The option is simply <code>-S</code> (uppercase) and <code>-v</code> for full info (as in, which dylib the symbol is in). For nm, that <code>-v</code> is <code>-m</code>. Unlike <code>dyldinfo</code>, the options aren't compatible.</p>
+
+<p>What's really useful here is the quick scriptability, like if you're looking for a particular symbol across many binaries:</p>
+
+<figure class="output">
+<pre>
+<span class="annotation"># If something calls SecTaskCopyValueForEntitlement, then it checks entitlements:</span>
+<span class="annotation"># (though there are other ways, like calling csops[_audittoken] directly..)</span>
+Phontifex-Magnus:/usr/libexec root# <span class="typed">for d in /usr/libexec/* ; do  \
+     if jtool -S $d 2>/dev/null | grep SecTaskCopy > /dev/null; then \
+        echo $d checks entitlements...; \
+     fi;  \
+     done</span>
+/usr/libexec/OTATaskingAgent checks entitlements...
+/usr/libexec/adid checks entitlements...
+/usr/libexec/configd checks entitlements...
+/usr/libexec/crash_mover checks entitlements...
+/usr/libexec/demod checks entitlements...
+/usr/libexec/demod_helper checks entitlements...
+/usr/libexec/keybagd checks entitlements...
+/usr/libexec/locationd checks entitlements...
+/usr/libexec/lockbot checks entitlements...
+/usr/libexec/lskdd checks entitlements...
+/usr/libexec/lskdmsed checks entitlements...
+/usr/libexec/mobile_obliterator checks entitlements...
+/usr/libexec/mobileassetd checks entitlements...
+/usr/libexec/nlcd checks entitlements...
+/usr/libexec/pfd checks entitlements...
+/usr/libexec/pkd checks entitlements...
+/usr/libexec/rolld checks entitlements...
+/usr/libexec/securityd checks entitlements...
+/usr/libexec/timed checks entitlements...
+/usr/libexec/transitd checks entitlements...
+/usr/libexec/webinspectord checks entitlements...
+</pre>
+</figure>
+
+<p>Well, not quick, maybe (it grows on you), but certainly efficient.</p>
+<font size="-1">(Luca, you can finally <code>ln -s ......jtool2 /usr/bin/nm</code> :-)</code></p></font>
+
+
+<h2>-F</code></h2>
+
+<p>Find a string in a file. <code>-v</code> will also show you the string, highlighted if part of a larger string:</p>
+
+<figure class="output">
+<pre>
+morpheus@Bifröst (~) % <span class="typed">jtool2 -F launchd /Volumes/PeaceD16D57.D321OS/sbin/launchd | head -5</span>
+0x100044a42:0x242:__DATA.__common
+0x100044bd6:0x3d6:__DATA.__common
+0x100032d9e:0x32d9e:__TEXT.__cstring
+0x100032e2f:0x32e2f:__TEXT.__cstring
+0x100032e9a:0x32e9a:__TEXT.__cstring
+morpheus@Bifröst (~) % <span class="typed">jtool2 -v -F launchd /Volumes/PeaceD16D57.D321OS/sbin/launchd | head -5</span>
+0x100044a42:0x242:__DATA.__common - __launchd
+0x100044bd6:0x3d6:__DATA.__common - __dof_launchd
+0x100032d9e:0x32d9e:__TEXT.__cstring - ...; root:libxpc_executables-1336.240.2~4/launchd/RELEASE_ARM64E
+0x100032e2f:0x32e2f:__TEXT.__cstring - ...; root:libxpc_executables-1336.240.2~4/launchd/RELEASE_ARM64E
+0x100032e9a:0x32e9a:__TEXT.__cstring - ...ies/libxpc_executables/install/Symbols/launchd
+<span class="annotation">#
+# SO useful for user mode entitlement searches:
+#</span>
+<span class="typed">jtool2 -v -F com.apple.private.alloy.coreduet /Volumes/PeaceD16D57.D321OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e</span>
+0x180f184b7:0xf184b7:CoreFoundation:__TEXT - com.apple.private.alloy.coreduet
+0x18ca02c6a:0xca02c6a:IDS:__TEXT - com.apple.private.alloy.coreduet
+0x1a05f1cf9:0x205f1cf9:PowerlogLiteOperators:__TEXT - com.apple.private.alloy.coreduet
+0x1a8c8c8e8:0x28c8c8e8:PowerlogHelperdOperators:__TEXT - com.apple.private.alloy.coreduet
+0x1ac971dfe:0x2c971dfe:KnowledgeMonitor:__TEXT - com.apple.private.alloy.coreduet
+</pre>
+</figure>
+
+<h2 id="kc">Kernel Caches (v2)</h2>
+
+<h3>Symbolication</h3>
+ <p>The <a href="/tools/joker.html">joker(j)</a> tool is effectively deprecated. It can now all be done with <code>--analyze</code>:</p>
+
+<figure class="output">
+<pre>
+<span class="annotation">#
+# New kernelcaches have no symbols:
+#</span>
+morpheus@Bifröst (~) % <span class="typed">jtool2 -S ~/Documents/iOS/13/kernelcache.release.iphone11</span>
+<span class="annotation">#
+# Run analysis, generating companion file:
+#</span>
+morpheus@Bifröst (~) % <span class="typed">jtool2 --analyze ~/Documents/iOS/13/kernelcache.release.iphone11</span>
+Analyzing kernelcache..
+This is a new-style A12 kernelcache (Darwin Kernel Version 19.0.0: Thu Jun 27 20:08:29 PDT 2019; root:xnu-6153.0.13.132.4~1/RELEASE_ARM64_T8020)
+-- Processing __TEXT_EXEC.__text..
+Disassembling 23244376 bytes from address 0xfffffff007b34000 (offset 0xb30000):
+__ZN11OSMetaClassC2EPKcPKS_j is 0xfffffff008067248 (OSMetaClass)
+Can't get IOKit Object @0x0 (0xfffffff008c007bc)
+Can't get IOKit Object @0x0 (0xfffffff00914b890)
+Analyzing __DATA.__data..
+Got _localnode_id @0xfffffff009198620
+Analyzing __DATA.__sysctl_set..
+Analyzing fuctions...
+Can't get realhost :-(
+Analyzing __DATA_CONST.. (1st pass)
+*** Got non zero value (0xfffffff007b89fc4) for non-pointer in sched struct - Please Tell J!
+-- Note: The memory_entry MIG subsytem contains more messages (3) than I expected (2)
+LAST ARG0 : fffffff007737fcc , fffffff007401370, 7eba
+last Arg2 is not 0?
+processing flows...
+Analyzing __DATA_CONST.. (2nd pass)
+*** Got non zero value (0xfffffff007b89fc4) for non-pointer in sched struct - Please Tell J!
+Analyzing __PPLTEXT.__text..
+opened companion file ./kernelcache.release.iphone11.ARM64.A59AC05A-2E67-3889-B6D7-ECC19A543C50
+Dumping symbol cache to file
+Symbolicated 4480 symbols and 85749 functions
+</pre>
+</figure>
+<p>The companion file is intentionally designed to be readable and editable, unlike dSyms or databases which may get corrupted. When you next get them symbols from Lumina(TM), remember where they must have been sourced from..</po>
+
+<figure class="output">
+<pre>
+morpheus@Bifröst (~) % <span class="typed">wc -l kernelcache.release.iphone11.ARM64.A59AC05A-2E67-3889-B6D7-ECC19A543C50</span>
+   90229 kernelcache.release.iphone11.ARM64.A59AC05A-2E67-3889-B6D7-ECC19A543C50
+morpheus@Bifröst (~) % <span class="typed">tail kernelcache.release.iphone11.ARM64.A59AC05A-2E67-3889-B6D7-ECC19A543C50</span>
+0xfffffff0093cbb38|ksyn_waitq_element|
+0xfffffff0093cd780|__ZN30AppleBCMWLANCoreFirmwareLoader10gMetaClassE|Rule 800
+0xfffffff0093cddf8|__ZN21AppleBCMWLANWorkOrder10gMetaClassE|Rule 824
+0xfffffff0093cde40|__ZN27AppleBCMWLANTxCommandBuffer10gMetaClassE|Rule 829
+0xfffffff0093cde68|__ZN23AppleBCMWLANPacketQueue10gMetaClassE|Rule 830
+0xfffffff0093cded8|__ZN27AppleBCMWLANQueueDescriptor10gMetaClassE|Rule 835
+0xfffffffc01086f3c|__ZNK11OSSerialize12getMetaClassEv|
+0xfffffffffffffde0|_cfil_ctl_disconnect|
+0xfffffffffffffe50|_flow_divert_send|
+0xfffffffffffffe50|_flow_divert_disconnect|
+
+</prE>
+</figure>
+
+<h3>Panic logs</h3>
+<p><code>--symbolicate</code> with crash log supplied, assuming companion file from <code>--analyze</code> was created. You know. Like all some high priced productz do (often, poorly), only free.</p>
+
+
+<h2 id="slc">DYLD Shared Caches</h2>
+
+<p>Apple prelinks most dylibs and plugins into a "Shared Library Cache". The SLC is located in <path>/var/db/dyld</path> (OS X) and <path>/System/Library/Caches/com.apple.dyld</path> (iOS). The OS X cache also has a "map", but the iOS one doesn't have a map.</p>
+
+<p>In iOS, there are no free floating dylibs - it's all in the cache. This makes caches very important, and there are quite a few "decaching" tools. JTool doesn't offer comprehensive support, only the stuff I find useful. In particular:</p>
+
+<figure class="output">
+
+<pre>
+<span class="annotation"># Identifying a shared cache file</span>
+Phontifex-Magnus:~ root# <span class="typed">jtool  /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64</span>
+File is a shared cache containing 1007 images (use -l to list)
+<span class="annotation"># Finding the map of a shared cache file (formerly, --map which isn't needed anymore</span>
+Phontifex-Magnus:~ root# <span class="typed">jtool -l /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64</span>
+File is a shared cache containing 1007 images
+   0:        180028000 /System/Library/AccessibilityBundles/AXSpeechImplementation.bundle/AXSpeechImplementation
+   1:        180030000 /System/Library/AccessibilityBundles/AccessibilitySettingsLoader.bundle/AccessibilitySettingsLoader
+   2:        18003c000 /System/Library/AccessibilityBundles/AccountsUI.axbundle/AccountsUI
+   3:        180040000 /System/Library/AccessibilityBundles/AddressBookUIFramework.axbundle/AddressBookUIFramework
+   4:        180048000 /System/Library/AccessibilityBundles/CameraKit.axbundle/CameraKit
+   5:        180058000 /System/Library/AccessibilityBundles/CameraUI.axbundle/CameraUI
+   6:        180064000 /System/Library/AccessibilityBundles/HearingAidUIServer.axuiservice/HearingAidUIServer
+   7:        180074000 /System/Library/AccessibilityBundles/MapKitFramework.axbundle/MapKitFramework
+   8:        180080000 /System/Library/AccessibilityBundles/MediaPlayerFramework.axbundle/MediaPlayerFramework
+...
+<span class="annotation"># And the -h (header) option, I added after Pangu 9. See anyhing different, boys and girls? *hint* *hint*</span>
+Phontifex-Magnus:~ root# <span class="typed">jtool -h /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64           </span>
+File is a shared cache containing 1007 images (use -l to list)
+6 mappings starting from 152, Mapping Count: 1007. 344 Images starting from 0
+DYLD base address: 0, Code Signature Address: 25a4c000 (2f0f02 bytes)
+Slide info: 1ca18000 (1a4000 bytes)
+Local Symbols: 204c8000 (5584000 bytes)
+mapping r--/r--    0MB        180000000 -> 180028000         (25d40000-25d68000)
+mapping r-x/r-x  384MB        180028000 -> 1980a4000         (28000-180a4000)
+mapping rw-/rw-   73MB        19a0a4000 -> 19ea18000         (180a4000-1ca18000)
+mapping r--/r--   12MB        1a0a18000 -> 1a16b0000         (1ca18000-1d6b0000)
+mapping r--/r--    0MB        1a16b0000 -> 1a16b4000         (25d68000-25d6c000)
+mapping r--/r--   46MB        1a16b4000 -> 1a44c8000         (1d6b4000-204c8000)
+</pre>
+</figure>
+
+<p>Jtool can easily decache files - simply use <code>-e <i>dylib</i></code> on a cache file to get your dylib. Note that the extracted dylib will be big - circa 50MB - because JTool does not deconstruct the merged <code>__LINKEDIT</code> segment. </p>
+<p><b>But why extract???</b> A key feature of Jtool that other decachers <i>do not</i> have, is its ability to work on a dylib while <b>still in the cache!</b> This not only saves you disk space, but also allows you to see how cached dylibs interact with eachother (e.g. cross dylib calls). To use this feature, simply specify ":" as a delimiter between the cache and the dylib name. All the standard features (e.g. <code>-l</code>, <code>-S</code>, etc), work, but the really useful feature is <code>-d</code>. For example:</p>
+
+
+<figure  class="output">
+<pre>
+
+root@phontifexMagnus (~)# <span class="typed">jtool -d /System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64:libMobileGestalt | more</span>
+Found but not extracting - setting File Start to 16a10000
+Disassembling from file offset 0x11a4, Address 0x196a111a4 
+Processing cached file from offset 16a38000  size: 25d44000
+_MGSetLogHandler:
+   196a111a4    ADRP   x8, 32640                ; ->R8 = 0x19e991000 
+   196a111a8    STR    X0, [X8, #280]           ; *0x19e991118 = X0 ARG0
+   196a111ac    RET                     
+_func_196a111b0:
+   196a111b0    ORR    W1, WZR, #0x1            ; ->R1 = 0x1 
+   196a111b4    B      _func_196a111b8  ; 196a111b8
+..
+
+</pre>
+</figure>
+<h2 id="objc">Objective-C Support</h2>
+
+<p><code>jtool</code> now recognizes objective-C. Use "<code>-d objc</code>" to get a list of classes:</p>
+
+<figure class="output">
+<pre>
+<span class="annotation"># Use with -v for more detail, without just the classlist</span>
+Zephyr:~ morpheus$  <span class="typed">jtool -d objc ~/Documents/RE/SpringBoard9.2 </span>
+SBNotificationCenterHeaderView
+SBNotificationCenterSectionInfo
+SBAppSwitcherStatusBarViewCache
+SBReachabilityManager
+SBBannerToNotificationCenterGestureHandler
+SBAppSwitcherSoftOutlineShadowView
+SBLegibilitySettings
+SpringBoard
+SBTransientActiveInterfaceOrientationRequester
+SBTelephonyAirplaneModeAlertItem
+SBUIController
+SBApplicationIcon
+SBAppSwitcherServiceManager
+SBInterfaceItemInfo
+SBItemInfoLayoutCache
+SBSectionInfo
+SBRowInfo
+</pre>
+</figure>
+
+<p>Using <code>-v</code> here will actually reverse the classes, a la classdump-Z, though with a bit more detail, and - as usual - color :-). You can also specify a classname as the argument to <code>-d</code>, and <Code>jtool</code> is smart enough to figure out you want to reverse it:</p>
+
+<img width="700" src="jtoolobjc.png" />
+
+<p><i>(Yes, I know that the protocols aren't demangled yet - I'm working on that)</i></p>
+
+<p><i>AND</i> you can then use <code>-d</code> to get to a particular method. To get buy the horrid +/-/[/spaces, you can use C++ like syntax:</p>
+
+
+<img width="700" src="jtoolobjc2.png" />
+
+
+<p>Note that this is done by reconstructing the classes <b>without linking with Apple's Objective-C library</b> so it also works on the Linux version! However, because I do the class walking by myself it might be A) still a bit slow (Springboard is a prime example, with countless classes) and B) possibly buggy. You can use <code>NOOBJC=1</code> to disable objective-c, but please let me know if you encounter bugs here.</p>
+
+<h3 id="darncool">Darn Cool Options</h2>
+
+<h3>MIG Detection (v0.98.9999 02/02/2016)</h3>
+
+ <p>No special switches for this one - If <code>jtool</code> detects you're dumping a <code>__DATA.__const</code> segment of a MIG enabled binary (e.g. the kernel or one of the many daemons of <path>/usr/libexec</path>), it will automatically ferret out the MIG dispatch tables. In full color, too :-)
+<img  width="800px" src="jtoolmig.png" />
+<br/>
+<p>You can try this on the OS X kernel for fun (that's <path>/System/Library/Kernels/kernel</path>), but doing so on the iOS kernel is even more useful. That said, there's also <a href="/tools/joker.html">Joker</a> for that.</p>
+
+<h3 id="j17" >Misc. Features (Jan 2017)</h3>
+
+<li>Significant speedup when companion files are detected</li>
+
+<li>More robust OBJ-C handling - won't crash as much. And please see note below on reporting crashes!</li>
+<li>New option: -D: to decompile - like -d, but will only show "; " lines, i.e. lines that Jtool decompiled. You could always do that with grep(1), but color got confusing.
+
+<br/>
+<br> Can your IDA do this:</li>
+
+<img width="700px" src="jtool-D.png" />
+<br><font size="-1">(err... maybe some IDAPython can do it. Dunno. But <code>jtool</code> does it for free :-)</font>
+
+<li>Forget extracting from the Shared Library Cache! <code>jtool</code> can now resolve all symbols in the cache, even when they are in a different dylib! This is <i>super useful</i> because AAPL's reconstructed libraries (in ~/Library/Developer/Xcode/*DeviceSupport) lose external symbols and mess up some __DATA refs. Note that SLC files still have private symbols &lt;redacted&gt;. Working on it.</li>
+
+
+<!--
+<li>Brought Back ARMv7k - NOT FULL YET, but does show you function calls. I thought I'd pitch ARMv7 for good, but then AAPL started using ARMv7k for WatchOS and eOS, and <code>otool</code> is just DEPLORABLE. So this is far from complete, but I'm on it. And yes, it's unstable. I know.</li>
+!-->
+
+
+<h2 id="stack">Stack emulation</h2>
+
+<p>Emulating the stack for functions is something I've been putting off for a long time. But recently I've decided it's time.. And by only following STR/STP I've managed to go a reasonably long way: <code>jtool</code> can now detect blocks created on the fly, and tell you what the function they contain is. For example, <code>dispatch_[a]sync</code> or <code>xpc_connection_set_event_handler</code>:</p>
+
+<img width="700px" src="jtoolblocks.png"/>
+<p>Better still, it can follow <code>mach_msg</code> construction on the fly. This is really super useful - One of my @TODOs for MOXiI Vol.1 is to document all of SpringBoard, Backboard, and the other daemon's MIGs. You can see how much time it saves me to just do this:</p>
+
+<figure class="output">
+<pre>
+<span class="annotation"># Note that:
+# A) you need to disable color for the regexp to work (because of curses sequences)
+# B) the regexp is then "mach_msg(" (decompiled function) or "begins with _" (function label)
+# C) jtool does everything in the cache, no need to extract!
+#</span>
+morpheus@Zephyr (~/Documents/Work/JTool) % <span class="typed">JCOLOR=0 jtool -d dyld_shared_cache_arm64:BackBoardServices |</span>
+|                                          <span class="typed"> egrep "(_mach_msg\(|^_)" | less</span>
+_BKSRestartActionOptionsDescription: <span class="annotation"># No mach_msg here </span>
+_BKSTouchDeliveryPolicyServerGetProxyWithErrorHandler: <span class="annotation"># No mach_msg here either..</span>
+__BKSHIDGetBacklightFactor:
+; _mach_msg(6000000)
+__BKSHIDSetBacklightFactorPending:
+; _mach_msg(6000001)
+__BKSHIDSetBacklightFactorWithFadeDuration:
+; _mach_msg(6000002)
+__BKSHIDSetBacklightFactorWithFadeDurationAsync:
+; _mach_msg(6000003)
+..
+morpheus@Zephyr (~/Documents/Work/JTool) % <span class="typed">jtool -d dyld_shared_cache_arm64:BackBoardServices |</span>
+                                           <span class="typed"> egrep "(_mach_msg\(|^_)"       </span>
+_BKSRestartActionOptionsDescription: 
+_BKSTouchDeliveryPolicyServerGetProxyWithErrorHandler: 
+__BKSHIDGetBacklightFactor:
+; _mach_msg(6000000)
+__BKSHIDSetBacklightFactorPending:
+; _mach_msg(6000001)
+__BKSHIDSetBacklightFactorWithFadeDuration:
+; _mach_msg(6000002)
+...
+__BKSHIDSetHardwareKeyboardLayout:
+; _mach_msg(6000056)
+__BKSHIDGetHardwareKeyboardLanguage:
+; _mach_msg(6000057)
+__BKSHIDSetEventRouters:
+; _mach_msg(0)  <span class="annotation"># OK, so it's not perfect -- I don't follow FP operations (yet)!</span>
+__BKSHIDSetKeyCommands:
+; _mach_msg(6000059)
+__BKSHIDSetStackshotCombos:
+; _mach_msg(6000059)
+__BKSHIDSetTouchHand:
+; _mach_msg(6000061)
+__BKSDisplayStart:
+; _mach_msg(6001000)
+__BKSDisplayIsDisabled:
+; _mach_msg(6001001)
+..
+</pre>
+</figure>
+
+<h2 id="decomp">decompilation improvements</h2>
+
+<p>Functions can now be defined with any argument, and <code>jtool</code> will easily decompile them for you! This has actually been around for a few months now, but I never documented it... And I can't even begin to extol how useful this is when reversing:</p>
+
+<img style="width:800px"  src="jtooldecomp1.png" />
+
+<p>So you can now define your functions in the companion file with parentheses and one letter per argument, denoting type:</p>
+
+<ul>
+	<li>p - pointer</li>
+	<li>s - char *</li>
+	<li>c - char</li>
+	<li>i - uint32_t</li>
+	<li>@ - CFString</li>
+	<li>x - hex</li>
+	<li>B - block (^)</li>
+	<li>l - uint64_t</li>
+
+</ul>
+
+<h2 id="sc">In-cache symbolication</h2>
+
+<code> jtool</code> has long been able to work on dylibs inside the shared cache - and actually has the ability to symbolicate references which would otherwise be lost when extracting - no matter how sophisticated your "decache" script is, as soon as the file is outside the cache any references to other files still in the cache are effectively lost. AAPL keeps modifying the various ways calls can be made - either by resolved stubs, direct calls to the function or (as of DYLD-5xx) "branch islands". But <code>jtool</code> supports them all.</p>
+
+<img style="width:800px"  src="jtoolsc.png" />
+
+
+
+<br/>
+
+<h2 id="codesign">Code Signing Options</h2>
+
+<p>Code signing options are, IMHO, the 2nd most useful feature of JTool. With iOS security revolving around code signatures and entitlements, it's important to have a way to quickly determine what given entitlements a binary possesses and how it is signed. OS X has <code>codesign(1)</code>, but I find it crude (at best) - and what more there's no port to iOS, where it's really necessary.</p>
+
+
+<h3 id="sig"><code>--sig</code></h3>
+
+<p>The <code>--sig</code> option allows you to validate or display a code signature. With no more arguments, it will display the signature blobs, and perform silent validation. <code>jtool2</code> presents cleaner output than its predecessor, and suppresses the hashes (since there are potentially hundreds) even when using <code>-v</code>:</p>
+
+
+<figure class="output" >
+<pre>
+morpheus@Bifröst (~) % <span class="typed">jtool2 -v --sig /Volumes/PeaceD16D57.D321OS/System/Library/CoreServices/SpringBoard.app/SpringBoard</span>
+An embedded signature of 114450 bytes, and 4 blobs
+	Blob 0: Type: 0 @44: Code Directory (96046 bytes)
+		Version:     20400
+		Flags:       adhoc  (0x2)
+		CodeLimit:   0xbb0110
+		Identifier:  com.apple.springboard (@0x58)
+		Executable Segment: Base 0x00000000 Limit: 0x00000000 Flags: 0x00000000
+		CDHash:	     88cfeafb874472a197beab3a02717b5e8e799bf41c9e0418511bece8566069a6 (computed)
+		# of Hashes: 2993 code + 5 special
+		Hashes @270 size: 32 Type: SHA-256
+	Blob 1: Type: 2 @96090:  Empty requirement set (12 bytes)
+	Blob 2: Type: 5 @96102: Entitlements (18340 bytes) (use --ent to view)
+	Blob 3: Type: 10000 @114442: Blob Wrapper (8 bytes) (0x10000 is CMS (RFC3852) signature)
+
+</pre>
+</figure>
+
+<p>If you really must display the hashes, use <code>-vv</code>.</p>
+<!--
+<p><code>jtool</code> will usually find the special slot resources automatically, but if not, you might want to help a little by specifying <code>--appdir</code></p>
+
+!-->
+<h3 id="ent"><code>--ent</code></h3>
+
+<p>If you want to examine the entitlements claimed by a binary, all it takes it <code>--ent</code>. Same as <code>codesign -d --ent</code>, but more accurate, because the latter also presents the blob header (as junk <code>&lt;FA&gt;&lt;DE&gt;qq^@^@)^S</code>):
+
+<figure class="output" >
+<pre>
+Phontifex-Magnus:~ root# <span class="typed">jtool  --ent /System/Library/CoreServices/SpringBoard.app/SpringBoard </span>
+&lt;!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"&gt;
+&lt;plist version="1.0"&gt;
+&lt;dict&gt;
+	&lt;key&gt;allow-obliterate-device&lt;/key&gt;
+	&lt;true/&gt;
+	<span class="annotation"># ....</span>
+	&lt;key&gt;keychain-access-groups&lt;/key&gt;
+	&lt;array&gt;
+		&lt;string&gt;apple&lt;/string&gt;
+		&lt;string&gt;com.apple.preferences&lt;/string&gt;
+	&lt;/array&gt;
+	&lt;key&gt;vm-pressure-level&lt;/key&gt;
+	&lt;true/&gt;
+&lt;/dict&gt;
+&lt;/plist&gt;
+</pre>
+</figure>
+
+
+<p><code>jtool2</code> also support SimPLISTic format, if you use <codE>--ent</code> with <code>-v</code>. This is really useful for heavily entitled binaries - again, taking SpringBoard as an example:</p>
+
+<figure class="output">
+<pre>
+morpheus@Bifröst (~) % <span class="typed">jtool2 -v --ent /Volumes/PeaceD16D57.D321OS/System/Library/CoreServices/SpringBoard.app/SpringBoard</span>
+	<span style="color:cyan">allow-obliterate-device</span>:  true
+	<span style="color:cyan">application-identifier</span>: <span style="color:cyan">com.apple.springboard
+	<span style="color:cyan">aps-connection-initiate</span>:  true
+	<span style="color:cyan">backupd-connection-initiate</span>:  true
+	<span style="color:cyan">checklessPersistentURLTranslation</span>:  true
+	<span style="color:cyan">com.apple.BTServer.allowRestrictedServices</span>:  true
+	<span style="color:cyan">com.apple.BTServer.programmaticPairing</span>:  true
+	<span style="color:cyan">com.apple.CallHistory.sync.allow</span>:  true
+	..
+</pre>
+</figure>
+
+<p>Once again, this is designed with shell scripting and <code>grep(1)</code> in mind, so you can do a <code>for file in /usr/libexec/*; do jtool --ent -v $file; done</code> or other pattern, to get all those undocumented entitlements used by Apple all over the place (That's how I created the <a href-"/ent.jl">Entitlement database</a>.</p>
+
+
+<h3 id="sign"><code>--sign</code> (v1)</h3>
+
+<p>The <code>--sign</code> option is an option I've had for a long time internally, and finally released. It is meant to self-sign binaries much in the same way as Saurik's <code>ldid</code>. As with <code>ldid</code>, you can specify an entitlements file to be inserted (using <code>--ent <i>filename</i></code>). The result is designed to be indistinguishable, once you get past the (temporary) warning/disclaimer:</p>
+
+<figure class="output" >
+<pre>
+morpheus@Zephyr (~)$ <span class="typed"> jtool --sign binary</span>
+Warning: Destructive option. Output (397920 bytes) written to out.bin</span>
+morpheus@Zephyr ()$ <span class="typed"> ldid -S binary</span>
+morpheus@Zephyr ()$ <span class="typed"> ls -l binary out.bin</span>
+-rwxr-xr-x  1 root  staff  397920 Oct 18 03:30 binary
+-rwxr-xr-x  1 root  staff  397920 Oct 18 03:30 out.bin
+morpheus@Zephyr ()$ <span class="typed"> diff out.bin binary</span>
+
+morpheus@Zephyr ()$ <span class="typed"> echo $?</span>
+0
+</pre>
+</figure>
+
+<p>Rather than using <code>codesign(1)</code> or <code>codesign_allocate(1)</code> internally, <code>jtool</code> performs the entire sequence step by step, so you can see for yourself how code signing ensues - using <code>JDEBUG=1</code>:</p>
+
+<figure class="output" >
+<pre>
+morpheus@Zephyr (~)$ <span class="typed">JDEBUG=1 ARCH=armv7 jtool  --sign --ent ent.xml  /tmp/a</span>
+Very last section ends at 0xc11c, so that's where the code signature will be
+Aligning to 16 byte offset - 0xc120
+Allocating Load Command
+First section offset is 7ea4; Mach header size is 580
+Patching header to reflect inserted command @580
+Patching __LINKEDIT to reflect new size of file
+Setting LC fields
+Allocating code signature superblob of 669 bytes, with 3 sub-blobs..
+Setting LC_CODE_SIGNATURE's blob size to match CS Blob size..
+Creating Code Directory with 13 code slots and 5 special slots
+Calculating Hashes to fill code slots..
+Need to pad 288 bytes to page size in last page (because code signature is also in this page)
+Padding to page size with 3808 bytes
+Calculating (modified) last page hash
+Adding empty requirements set to 447
+Filling the special slot (-2) for requirements blob...
+ Copying entitlements blob to 459
+Filling the special slot (-5) for entitlement blob...
+ Crafting New Mach-O
+Inserting 669 bytes Blob at 49440, bringing new file size to 50109
+Warning: Destructive option. Output (50109 bytes) written to out.bin
+
+
+</pre>
+</figure>
+<h3>Code signing using Security.framework APIs (MacOS)</h3>
+<p><code>jtool</code> (on MacOS) now uses security framework APIs if you specify --sident (not to be confused with --ident, for the Code Directory Identity) , and specify a partial name or Apple ID or Team ID.</p>
+<img src="codesign.png" style=" width : 800px" />
+<br/>
+<div class="note">
+ There's much more, but I'll pick this up later. If you use <code>jtool</code> and find bugs, don't just complain silently - <b>LET ME KNOW</b> and I'll be glad to fix. Likewise if you have any suggestions for improvement. Remember - I build the functionality around my own use cases - and I'll be happy to adjust if you have any others.
+<br/>
+
+<b>And I don't care if you use IDA or IDA can do this (if they can't, they'll adopt this in their next version) or there's IDAPython, or whatever. This is the tool I use, I find it useful, and I'm encouraging others to use it (freely, unlike IDA/Hopper and their ilk) and suggest improvements. </b>
+
+</div>
+<hr/>
+
+<p>More to come:</p>
+<ul>
+ <li>Full extraction of dylibs from cache</li>
+<li>improved code signing</li>
+</ul>
+
+
+
+<h2>Frequently Asked Questions</h2>
+
+<ul>
+ <li><b><u>Is this open source?</u></b> No. Neither is my other reversing tool, <a href="http://NewAndroidBook.com/tools/dextra.html">Dextra</a> (for Android). Free, yes. But not open source.</li>
+ <li><b><u>*Why* is this not open source?</u></b> Is Hopper? Is IDA? So I'm in good company :-) <code>jtool</code> started as a simple <code>otool -l</code>, but things spiraled out of control when I started doing the disassembly. There's just too much original code in there for me to just share with whatever license, that others can rip and not even mention credit in passing. Sorry. I speak from bitter experience here. It's still <b>FREE</b> though, which is more than what most tools (save, of course, <code>otool</code>) can say.</li>
+
+ <li><b><u>Can I write plugins?</u></b> better. You can script it with shell commands (it's designed to be <code>grep(1)</code> and other filter-friendly), and you can write entire programs to use <code>jtool</code>'s logic - <code>machlib</code> and <code>disarm</code> - as dylibs.</li>
+
+ <li><b><u>What's up with color? Why is it disabled when I pipe, and messy when I JCOLOR=1 and pipe?</u></b> Because color is done via curses. It's the default when you DON't pipe (i.e. <code>jtool</code> detects the stdout is a tty), and when you do it's disabled unless you insist (<code>JCOLOR=1</code> or <code>export...</code>). But if you do that, use <code>less -R</code> so <code>less</code> (which is <code>more</code>) can handle the sequences. <b>Or try <Code>--html</Code> for colorized, hyperlinked HTML output you can save to a file.</b></li>
+
+ <li><b><u>What's the deal with ARM32/Thumb?</u></b> Though the disassembler originally was for 32, when it became clear it's a choice between my sanity and support ARM32/Thumb, I opted for the former. This way I can write you other books and tools. <code>jtool</code> actually is pretty good still with ARM, but it's not officially supported. ARM64 is, though, and is fairly comprehensive (sans FP/SIMD, which only SpringBoard and a few other daemons use. I'll get to that at some point, if I get stranded for hours with absolutely no Internet and nothing else to do). <b>Update: ARMv7k is kind of back</b></li>
+<li><b><u>Why not use foundstone or some other disassembly framework?</u></b> Because it wouldn't be <b>J</b>tool then, now, would it? :-) The code is 100% original and mine, sharing no sources what-so-ever with any other code, open or closed (save for obvious include files)</li>
+  <li><b><u>How do we contribute?</u></b> By suggesting improvements, asking for features, or reporting bugs on the <a href="http://NewOSXBook.com/forum/">OS X Book Forum</a></li>
+<li><b><u>What can we do that will be COUNTER productive, and not in any way contribute?</u></b> <br/>You can bitch on Twitter whenever you encounter a crash:
+<br/>
+<img src="osxjtool.png" width="400px"/>
+<br/>
+and yes, you can use the pathetic otool which is rock solid, because it's as functional as a rock. And, you can NOT read the manual page which distinctly says that jtool does crash in some cases. I <b>wish</b> you could use <code>otool</code> instead, but AAPL ruined what was good in it by rewriting it to use <code>objdump</code> , dumping it down, indeed.
+<br/>
+<br/>Seriously, <b>IF JTOOL CRASHES FOR YOU, LET ME KNOW AND I'LL FIX IT. COMPLAINING ACHIEVES NOTHING, AND THERE IS AN INSANE AMOUNT OF LOGIC IN JTOOL, SO YEAH, IT AIN'T PERFECT. But hey - it leaves otool in ashes, and it's FREE. I don't expect thanks, but just slamming the tool and not even reporting a bug is being a douche.</b>
+</li>
+  
+
+
+
+</div>
+</article>
+</body>
+</html>
